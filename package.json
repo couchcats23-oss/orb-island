@@ -1,0 +1,9 @@
+{
+  "name": "orb-island",
+  "version": "1.0.0",
+  "description": "Orb Island - a fan-made, non-commercial multiplayer island survival game inspired by the anime Btooom!",
+  "type": "module",
+  "private": true,
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}
