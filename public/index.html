@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ORB ISLAND · Last Signal</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="A fan-made, non-commercial multiplayer survival game on a giant jungle island. Chip radar, orbs, proximity voice chat.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%2712%27 fill=%27%23262b31%27 stroke=%27%2359ffd0%27 stroke-width=%272%27/%3E%3Cellipse cx=%2716%27 cy=%2716%27 rx=%2712%27 ry=%274%27 fill=%27none%27 stroke=%27%23ff9a3c%27 stroke-width=%272.5%27/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+<script>
+  // Surface load errors on screen so a blocked CDN or a bad browser doesn't just show a black page.
+  (function () {
+    function show(msg) { var e = document.getElementById('errbox'); if (!e) return; e.classList.remove('hidden'); e.querySelector('pre').textContent += msg + '\n'; }
+    window.addEventListener('error', function (ev) { show((ev.message || 'Script error') + (ev.filename ? '  (' + ev.filename.split('/').slice(-2).join('/') + ':' + ev.lineno + ')' : '')); }, true);
+    window.addEventListener('unhandledrejection', function (ev) { show('Unhandled: ' + (ev.reason && ev.reason.message || ev.reason)); });
+    // Slow connections / old laptops can take a while to fetch three.js, so wait longer before complaining.
+    setTimeout(function () { if (!window.__orbBooted) show('The game did not start. If you are offline, three.js cannot load from the CDN (cdn.jsdelivr.net). On a slow connection, wait a bit longer or reload.'); }, 20000);
+  })();
+</script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="under"></div>
+
+<!-- ============================ LOADING ============================ -->
+<div id="loading" class="screen">
+  <div class="brand big">ORB<span>ISLAND</span></div>
+  <div class="bar"><div id="load-fill"></div></div>
+  <div id="load-text">Preparing the island…</div>
+</div>
+
+<!-- ============================ MAIN MENU ============================ -->
+<div id="menu" class="screen hidden">
+  <div class="menu-left">
+    <div class="brand big">ORB<span>ISLAND</span></div>
+    <div class="tagline">LAST SIGNAL</div>
+    <p class="blurb">Parachute onto a vast, forgotten island. Your left-hand chip is a radar and a target. Take chips from the others before they take yours.</p>
+    <label class="field">Callsign<input id="in-name" maxlength="16" placeholder="Player" autocomplete="off" spellcheck="false"></label>
+    <label class="field">Private lobby code <em>(optional, share with friends)</em><input id="in-code" maxlength="8" placeholder="e.g. WOLF42" autocomplete="off" spellcheck="false"></label>
+    <button id="btn-play" class="primary">PLAY</button>
+    <div class="row">
+      <button id="btn-settings" class="ghost">Settings</button>
+      <button id="btn-how" class="ghost">How to play</button>
+    </div>
+    <div id="stats" class="stats">…</div>
+  </div>
+  <div class="menu-foot">Fan-made, non-commercial tribute. Not affiliated with any publisher. All art and audio are generated in your browser.</div>
+</div>
+
+<!-- ============================ LOBBY / QUEUE ============================ -->
+<div id="lobby" class="screen hidden">
+  <div class="panel lobby-panel">
+    <div class="panel-head"><span id="lb-title">MATCHMAKING</span><span id="lb-code" class="code hidden"></span></div>
+    <div id="lb-status" class="status">Connecting…</div>
+    <div id="lb-count" class="count"></div>
+    <div id="lb-players" class="plist"></div>
+    <div class="voice-row">
+      <button id="btn-mic" class="ghost small">Enable microphone</button>
+      <span id="mic-state" class="muted"></span>
+      <button id="btn-lb-settings" class="ghost small">Settings</button>
+    </div>
+    <div class="muted small-text">Voice chat connects automatically with everyone in this lobby. Hold <b>V</b> to talk (push-to-talk) or change it in Settings → Voice.</div>
+    <div id="lb-chat-log" class="chatlog"></div>
+    <input id="lb-chat-input" maxlength="140" placeholder="Type a message and press Enter" autocomplete="off">
+    <button id="btn-cancel" class="ghost danger">Leave queue</button>
+  </div>
+</div>
+
+<!-- ============================ HUD ============================ -->
+<div id="hud" class="hidden">
+  <div id="hud-top">
+    <div class="stat"><label>TIME</label><b id="h-timer">13:00</b></div>
+    <div class="stat chips"><label>CHIPS</label><b id="h-chips">0 / 3</b></div>
+    <div class="stat"><label>ALIVE</label><b id="h-alive">0 / 0</b></div>
+  </div>
+  <div id="killfeed"></div>
+  <div id="voice-hud"></div>
+  <div id="mic-ind" class="hidden"></div>
+  <div id="toasts"></div>
+  <div id="crosshair"><i></i></div>
+  <div id="indicators"></div>
+  <div id="charge" class="hidden"><div id="charge-fill"></div></div>
+  <div id="fuse" class="hidden"></div>
+  <div id="hint" class="hidden"></div>
+  <div id="spectate" class="hidden"><span>SPECTATING</span> <b id="spec-name"></b> <small>click: next · A / D</small></div>
+
+  <div id="radar-wrap"><canvas id="radar" width="256" height="256"></canvas><div id="radar-label">CHIP READY · Q</div></div>
+
+  <div id="bottom">
+    <div id="orb-info"><b id="orb-name">Empty</b><span id="orb-desc"></span></div>
+    <div id="bandolier"></div>
+    <div id="vitals">
+      <div class="meter"><div id="hp-fill"></div><span id="hp-num">100</span></div>
+      <div class="meter thin"><div id="st-fill"></div></div>
+    </div>
+  </div>
+
+  <div id="chat"><div id="chat-log"></div><input id="chat-input" maxlength="140" placeholder="Say something…" autocomplete="off"></div>
+  <div id="scoreboard" class="hidden">
+    <table><thead><tr><th>PLAYER</th><th>CHIPS</th><th>STATUS</th></tr></thead><tbody id="sb-body"></tbody></table>
+  </div>
+  <div id="vignette"></div>
+  <div id="flashwhite"></div>
+</div>
+
+<div id="fps" class="hidden"></div>
+
+<!-- ============================ PAUSE ============================ -->
+<div id="pause" class="screen hidden">
+  <div class="panel narrow">
+    <div class="panel-head" id="pause-title">PAUSED</div>
+    <p class="muted center">Click anywhere to take control of the mouse.</p>
+    <button id="btn-resume" class="primary">Resume</button>
+    <button id="btn-pause-settings" class="ghost">Settings</button>
+    <button id="btn-pause-how" class="ghost">Controls</button>
+    <button id="btn-leave" class="ghost danger">Leave match</button>
+  </div>
+</div>
+
+<!-- ============================ RESULTS ============================ -->
+<div id="results" class="screen hidden">
+  <div class="panel">
+    <div class="panel-head" id="res-title">MATCH OVER</div>
+    <div id="res-sub" class="status"></div>
+    <table class="res"><thead><tr><th>#</th><th>PLAYER</th><th>CHIPS</th><th>ELIMS</th><th>DOWNED</th><th></th></tr></thead><tbody id="res-body"></tbody></table>
+    <div id="res-next" class="muted center"></div>
+    <button id="btn-res-leave" class="ghost danger">Leave</button>
+  </div>
+</div>
+
+<!-- ============================ HOW TO PLAY ============================ -->
+<div id="howto" class="screen hidden">
+  <div class="panel wide">
+    <div class="panel-head">HOW TO PLAY <button class="x" data-close="howto">✕</button></div>
+    <div class="cols">
+      <div>
+        <h3>Objective</h3>
+        <p>Everyone wears an <b>IC chip</b> in their left hand. Eliminate other players and pick up the chips they drop. Collect <b id="how-goal">3</b> chips, or be the last survivor, to win. When time runs out, the most chips (then health) wins.</p>
+        <h3>The chip radar</h3>
+        <p>Press <b>Q</b> to pulse your chip. It maps <b>moving</b> players within 150&nbsp;m, but it also pings every chip in range, so they know a scan happened and where it came from. Two scans at nearly the same moment cancel each other out. Standing still keeps you off the radar.</p>
+        <h3>Orbs</h3>
+        <p>You carry up to eight on your bandolier. Walk over supply caches (glowing columns near landmarks) or fallen players' drops to restock. Hold <b>left mouse</b> to wind up a throw, release to throw. Right mouse is a short lob.</p>
+        <table class="keys">
+          <tr><td>W A S D</td><td>Move</td><td>Shift</td><td>Sprint (stamina)</td></tr>
+          <tr><td>Space</td><td>Jump</td><td>C (hold)</td><td>Crouch</td></tr>
+          <tr><td>1–8 / wheel</td><td>Select orb</td><td>Z / X</td><td>Timer fuse − / +</td></tr>
+          <tr><td>Q</td><td>Chip radar</td><td>G / Shift+G</td><td>Detonate remote orb(s)</td></tr>
+          <tr><td>V (hold)</td><td>Push-to-talk</td><td>M</td><td>Mute mic</td></tr>
+          <tr><td>Enter</td><td>Text chat</td><td>Tab</td><td>Scoreboard</td></tr>
+        </table>
+      </div>
+      <div><h3>Orb types</h3><div id="orb-list" class="orblist"></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ SETTINGS ============================ -->
+<div id="settings" class="screen hidden">
+  <div class="panel wide">
+    <div class="panel-head">SETTINGS <button class="x" data-close="settings">✕</button></div>
+    <div class="tabs" id="set-tabs"></div>
+    <div id="set-body"></div>
+  </div>
+</div>
+
+<div id="errbox" class="hidden"><b>Something went wrong</b><pre></pre><button class="ghost small" onclick="location.reload()">Reload</button></div>
+
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>
