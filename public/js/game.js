@@ -58,7 +58,7 @@ export class Game {
     for (const p of msg.players) {
       if (p.id === m.id) { this.meAvatar = new Avatar(p.color, p.name); this.meAvatar.group.visible = false; this.scene.add(this.meAvatar.group); this.meInfo = p; continue; }
       const av = new Avatar(p.color, p.name); av.group.visible = false; this.scene.add(av.group);
-      this.players.set(p.id, { id: p.id, name: p.name, color: p.color, avatar: av, buf: [], s: { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, fl: 0 }, hp: 100, chips: 0, stepAcc: 0, fire: 0, seen: false });
+      this.players.set(p.id, { id: p.id, name: p.name, color: p.color, bot: !!p.bot, avatar: av, buf: [], s: { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, fl: 0 }, hp: 100, chips: 0, stepAcc: 0, fire: 0, seen: false });
     }
     m.x = msg.spawn.x; m.y = msg.spawn.y; m.z = msg.spawn.z; m.yaw = Math.atan2(m.x, m.z); m.pitch = -0.3;
     m.alive = true; m.phase = 'drop'; m.hp = RULES.hp; m.stam = 1;
@@ -71,7 +71,7 @@ export class Game {
     this.hud.hint('WASD to glide  ·  land on the island');
     this.hud.toast(`Collect ${this.goal} chips from other players to win`, 'info');
     this.audio.init(); this.audio.resume(); this.audio.startAmbience(); this.audio.startMusic(); this.audio.parachute();
-    this.voice.setPeers(msg.players.map((p) => p.id), m.id);
+    this.voice.setPeers(msg.players.filter((p) => !p.bot).map((p) => p.id), m.id); // bots have no voice
     this.camera.fov = S.fov; this.camera.updateProjectionMatrix();
     this.active = true; this.t = now(); this.pkTimer = 0;
   }
@@ -207,7 +207,7 @@ export class Game {
       case 'got': this.audio.pickup(); this.hud.toast('Orbs collected', 'good'); break;
       case 'left': {
         const p = this.players.get(m.id);
-        if (p) { this.hud.feed(`${this.hud.nameHtml(p)} disconnected`); p.avatar.dispose(); this.players.delete(m.id); this.voice.setPeers([...this.players.keys(), me.id], me.id); }
+        if (p) { this.hud.feed(`${this.hud.nameHtml(p)} disconnected`); p.avatar.dispose(); this.players.delete(m.id); this.voice.setPeers([...this.players.values()].filter((q) => !q.bot).map((q) => q.id).concat(me.id), me.id); }
         break;
       }
       default: break;
@@ -600,7 +600,7 @@ export class Game {
       this.voice.update(getPos, S.voiceMode === 'prox');
     }
     if (this.tab) {
-      const rows = [...this.players.values()].map((p) => ({ name: p.name, color: p.color, chips: p.chips, alive: !(p.s.fl & FLAGS.DEAD), talking: this.voice.speaking(p.id), me: false }));
+      const rows = [...this.players.values()].map((p) => ({ name: p.name + (p.bot ? ' [bot]' : ''), color: p.color, chips: p.chips, alive: !(p.s.fl & FLAGS.DEAD), talking: this.voice.speaking(p.id), me: false }));
       if (this.meInfo) rows.push({ name: this.meInfo.name, color: this.meInfo.color, chips: m.chips, alive: m.alive, talking: this.voice.localSpeaking(), me: true });
       rows.sort((a, b) => b.chips - a.chips || (b.alive - a.alive));
       h.scoreboard(true, rows);

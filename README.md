@@ -20,6 +20,7 @@ MIN_PLAYERS=1 node server.js   # solo test: a match starts with one player
 
 Open the page, enter a callsign and press **PLAY**. The game joins the matchmaking queue; the match drops once 2+ players are
 waiting (25 s countdown, or 6 s when the lobby is full). Use a **private lobby code** (same code = same lobby) to play with friends.
+No one else online? Use **Practice** on the menu to play against computer players (see below).
 
 The 3D engine ([three.js r170](https://threejs.org)) is loaded from the jsDelivr CDN, so players need internet access.
 
@@ -40,6 +41,7 @@ each other (strict NAT / corporate networks) add a TURN server:
 | `PORT` / `HOST` | listen port / interface | `8080` / `0.0.0.0` |
 | `MIN_PLAYERS` / `MAX_PLAYERS` | players needed to start / lobby size (max 12) | `2` / `12` |
 | `COUNTDOWN` | seconds before a match starts once min players are in | `25` |
+| `MAX_PRACTICE` | practice (bot) matches the server runs at once; extra requests are told it is busy | `4` |
 | `STUN_URLS` | comma-separated STUN urls | Google STUN |
 | `TURN_URL`, `TURN_USER`, `TURN_PASS` | optional TURN relay | none |
 
@@ -83,6 +85,34 @@ Blast damage falls off with distance, and terrain or walls absorb most of it. Or
 | Enter | text chat | Tab | scoreboard |
 
 Dead players spectate (click or A / D to switch).
+
+### Practice mode (play against bots)
+
+The **Practice** box on the main menu starts a private match against computer players: pick a difficulty (**Easy / Normal / Hard / Mixed**)
+and 3, 5, 7 or 11 bots, then press **Play vs bots**. The match starts a few seconds later, with the same island, rules, orbs, chips and win
+conditions as an online game. Nobody else can join, and there is no voice chat.
+
+It is called "practice" rather than "offline" because the bots live **in the server**, so you still need the server running and the page
+open from it (on a free host that means the same URL you always use). Nothing extra to install.
+
+The bots are meant to be opponents rather than target dummies. They only use information a human would have: they see inside a view cone with
+line of sight, hear footsteps, read their own chip radar, and get the same scan warnings you do. Each has a play style:
+
+| Style | Behaviour |
+|---|---|
+| Hunter | scans often, pushes toward contacts, fights at medium range |
+| Ambusher | hides, scans rarely, lays remote orbs and gas traps, fights from range |
+| Scavenger | grabs caches and dropped chips first, fights when it is well stocked |
+| Flanker | circles round to attack from the side or behind, close-range fights |
+
+In a fight they peek out of cover and strafe, lead moving targets, pick the orb for the situation (flat throws at distance, gas to flush you out
+of cover, flame lines, implosion orbs on groups, remote orbs they detonate when you walk past, barriers when hurt), dodge incoming orbs and run
+for the edge of a blast. They save their last orbs for good shots, and when nobody has met anyone for a while they start closing in (late in the match
+they get more aggressive), so matches do not stall. **Easy** reacts slowly and misses a lot, **Normal** is a fair fight, **Hard** reacts fast,
+aims tight and almost always dodges the first throw. **Mixed** gives each bot a random level.
+
+Bots cost the server little (about 0.15 ms per bot tick when tested), so a free Render instance copes, but a practice match still
+shares that small CPU with any human matches, which is why `MAX_PRACTICE` caps how many run at once.
 
 ### Voice chat
 
@@ -130,7 +160,11 @@ a USB mouse makes charged throws easier. Use headphones so the microphone doesn'
 ## Project layout
 
 ```
-server.js            HTTP static server, WebSocket, matchmaking, authoritative orb/sonar/pickup simulation, voice signalling
+server.js            HTTP static server, WebSocket, matchmaking, authoritative orb/sonar/pickup simulation, voice signalling, practice lobbies
+bot_brain.js         bot players: perception (sight/hearing/radar), difficulty levels, play styles, state machine
+bot_think.js         bot decisions: where to drop, roam, loot, hide, ambush, flee, hunt   bot_combat.js  duels, orb choice, aiming, traps
+bot_aim.js           ballistic solver that mirrors the server's orb physics              bot_nav.js     bot movement, steering, line of sight
+bot_util.js          small helpers for the bot files
 public/index.html    all UI screens          public/style.css
 public/js/main.js    renderer, menu, lobby, settings, results, main loop
 public/js/game.js    in-match client: input, movement, throwing, interpolation, events
@@ -148,5 +182,7 @@ Tuning gameplay is mostly editing `public/js/rules.js` (match length, chip goal,
 
 * Movement is client-authoritative with a server anti-teleport check: fine for friends, not hardened against cheaters.
 * Matches are held in server memory; restarting the server drops all lobbies.
+* Bot behaviour was tuned with headless simulations of full matches (and the practice screens were exercised in a browser with a stubbed 3D engine),
+  not by playing every difficulty by hand. If a bot feels too easy or too hard, the numbers are in `LEVELS` and `PERSONAS` at the top of `bot_brain.js`.
 * Needs a WebGL2 browser (current Chrome, Edge, Firefox).
 * If the page stays black, an error box lists what failed (usually a blocked CDN or no WebGL2). `window.__orb` exposes the game objects in the console for debugging.

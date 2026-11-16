@@ -44,6 +44,14 @@
     <label class="field">Callsign<input id="in-name" maxlength="16" placeholder="Player" autocomplete="off" spellcheck="false"></label>
     <label class="field">Private lobby code <em>(optional, share with friends)</em><input id="in-code" maxlength="8" placeholder="e.g. WOLF42" autocomplete="off" spellcheck="false"></label>
     <button id="btn-play" class="primary">PLAY</button>
+    <div class="practice">
+      <div class="practice-head">PRACTICE <em>solo match against computer players</em></div>
+      <div class="row">
+        <select id="in-level" title="Bot difficulty"><option value="easy">Easy</option><option value="normal">Normal</option><option value="hard">Hard</option><option value="mixed">Mixed</option></select>
+        <select id="in-bots" title="Number of bots"><option value="3">3 bots</option><option value="5">5 bots</option><option value="7">7 bots</option><option value="11">11 bots</option></select>
+        <button id="btn-practice" class="ghost">Play vs bots</button>
+      </div>
+    </div>
     <div class="row">
       <button id="btn-settings" class="ghost">Settings</button>
       <button id="btn-how" class="ghost">How to play</button>
@@ -65,7 +73,7 @@
       <span id="mic-state" class="muted"></span>
       <button id="btn-lb-settings" class="ghost small">Settings</button>
     </div>
-    <div class="muted small-text">Voice chat connects automatically with everyone in this lobby. Hold <b>V</b> to talk (push-to-talk) or change it in Settings → Voice.</div>
+    <div id="lb-voice-note" class="muted small-text">Voice chat connects automatically with everyone in this lobby. Hold <b>V</b> to talk (push-to-talk) or change it in Settings → Voice.</div>
     <div id="lb-chat-log" class="chatlog"></div>
     <input id="lb-chat-input" maxlength="140" placeholder="Type a message and press Enter" autocomplete="off">
     <button id="btn-cancel" class="ghost danger">Leave queue</button>

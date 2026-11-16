@@ -22,7 +22,35 @@ const show = (id, v) => $(id).classList.toggle('hidden', !v);
 
 // ------------------------------------------------------------------ renderer / scene
 const canvas = $('view');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance', stencil: false });
+
+// Create the WebGL2 context ourselves so we can retry with gentler options (some older GPUs / Chromebooks refuse
+// the first set) and, if it still fails, explain what is wrong instead of just crashing.
+function createGL() {
+  const tries = [
+    { antialias: false, powerPreference: 'high-performance', stencil: false },
+    { antialias: false, powerPreference: 'default', stencil: false },
+    { antialias: false, alpha: false },
+    {},
+  ];
+  for (const attrs of tries) {
+    try { const gl = canvas.getContext('webgl2', attrs); if (gl) return gl; } catch (e) { /* try next */ }
+  }
+  return null;
+}
+function explainNoGL() {
+  let gl1 = false;
+  try { const c = document.createElement('canvas'); gl1 = !!(c.getContext('webgl') || c.getContext('experimental-webgl')); } catch (e) { /* none */ }
+  const m = /Chrom(?:e|ium)\/(\d+)/.exec(navigator.userAgent);
+  const msg = 'This browser could not start WebGL 2, which the game needs. ' +
+    '(Chrome version: ' + (m ? m[1] : 'unknown') + '; basic WebGL 1: ' + (gl1 ? 'yes' : 'no') + ')\n' +
+    'Things to try: open https://get.webgl.org/webgl2/ to test your browser; make sure hardware acceleration is on; ' +
+    'in Chrome open chrome://flags/#ignore-gpu-blocklist, set it to Enabled and restart the browser; update Chrome / the OS; ' +
+    'or play on a newer computer.';
+  const t = document.getElementById('load-text'); if (t) t.textContent = 'Your browser could not start WebGL 2.';
+  throw new Error(msg);
+}
+const gl = createGL() || explainNoGL();
+const renderer = new THREE.WebGLRenderer({ canvas, context: gl, antialias: false, powerPreference: 'high-performance', stencil: false });
 renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.85;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 const scene = new THREE.Scene();
@@ -69,6 +97,7 @@ async function boot() {
   game.onLock = onLockChange;
   bindUI(); bindNet(); buildSettingsUI(); buildHowTo();
   $('in-name').value = S.name || ''; $('in-code').value = S.code || '';
+  try { const pr = JSON.parse(localStorage.getItem('orb-island-practice')); if (pr) { $('in-bots').value = String(pr.bots); $('in-level').value = pr.level; } else $('in-level').value = 'normal'; } catch { /* defaults */ }
   onChange(onSettingChanged);
   window.__orb = { game, net, hud, world, effects, audio, voice, camera, scene, renderer, S };
   show('loading', false); setState('menu');
@@ -102,6 +131,18 @@ async function play() {
   net.send({ t: 'queue', name, code });
 }
 
+function practice() {
+  const name = ($('in-name').value || '').trim().slice(0, 16) || 'Player';
+  const bots = Number($('in-bots').value) || 5, level = $('in-level').value || 'normal';
+  set('name', name);
+  try { localStorage.setItem('orb-island-practice', JSON.stringify({ bots, level })); } catch {}
+  audio.init(); audio.resume(); audio.uiClick(); audio.startMusic();
+  setState('queue'); lobbyInfo = null; lobbyJoinedAt = performance.now();
+  $('lb-status').textContent = 'Connecting to server…'; $('lb-count').textContent = ''; $('lb-players').innerHTML = ''; $('lb-chat-log').innerHTML = ''; show('lb-code', false);
+  net.connect().then(() => net.send({ t: 'queue', name, code: '', practice: { bots, level } }))
+    .catch((e) => { setState('menu'); alert('Could not reach the game server.\n' + e.message); });
+}
+
 function leaveToMenu() {
   net.send({ t: 'leave' });
   game.stop(false); voice.closeAll(); audio.stopAmbience();
@@ -112,17 +153,19 @@ function renderLobby(m) {
   lobbyInfo = m;
   for (const p of m.players) colors[p.id] = p.color;
   show('lb-code', !!m.code); if (m.code) $('lb-code').textContent = 'CODE ' + m.code;
-  $('lb-title').textContent = m.code ? 'PRIVATE LOBBY' : 'MATCHMAKING';
+  $('lb-title').textContent = m.practice ? 'PRACTICE vs BOTS' : m.code ? 'PRIVATE LOBBY' : 'MATCHMAKING';
+  show('lb-voice-note', !m.practice); $('lobby').classList.toggle('practice-lobby', !!m.practice); $('btn-cancel').textContent = m.practice ? 'Cancel practice' : 'Leave queue';
   const n = m.players.length, full = n >= m.max;
   let status;
-  if (n < m.min) status = `Searching for players… (${n}/${m.min} needed)`;
+  if (m.practice) status = m.countdown !== null ? 'Practice match ready' : 'Setting up…';
+  else if (n < m.min) status = `Searching for players… (${n}/${m.min} needed)`;
   else if (m.countdown !== null) status = full ? 'Lobby full' : 'Match found';
   else status = 'Waiting…';
   $('lb-status').textContent = status;
   const waited = (performance.now() - lobbyJoinedAt) / 1000;
   $('lb-count').textContent = n >= m.min && m.countdown !== null ? `Drop in ${m.countdown}s` : (waited > 15 && n < m.min ? 'Nobody else yet. Invite friends, or share a private lobby code.' : '');
-  $('lb-players').innerHTML = m.players.map((p) => `<div class="pl" data-id="${esc(p.id)}"><i style="background:${p.color}"></i><span class="nm">${esc(p.name)}</span>${p.id === net.id ? '<em>you</em>' : ''}<span class="mic"></span></div>`).join('') + `<div class="muted small-text">${n}/${m.max} players</div>`;
-  voice.setPeers(m.players.map((p) => p.id), net.id);
+  $('lb-players').innerHTML = m.players.map((p) => `<div class="pl" data-id="${esc(p.id)}"><i style="background:${p.color}"></i><span class="nm">${esc(p.name)}</span>${p.id === net.id ? '<em>you</em>' : ''}${p.bot ? '<em class="bot">bot</em>' : ''}<span class="mic"></span></div>`).join('') + (m.practice ? '' : `<div class="muted small-text">${n}/${m.max} players</div>`);
+  voice.setPeers(m.players.filter((p) => !p.bot).map((p) => p.id), net.id); // bots have no voice
 }
 
 function bindNet() {
@@ -138,7 +181,7 @@ function bindNet() {
     audio.stopMusic(); game.begin(m); setState('match'); firstLock = true; updatePause();
   });
   net.on('end', (m) => { if (state !== 'match') return; game.finish(); showResults(m); });
-  net.on('left', () => { if (state === 'queue') setState('menu'); });
+  net.on('left', (m) => { if (state === 'queue') setState('menu'); if (m && m.why === 'busy') alert('The server is running its maximum number of practice matches right now. Try again in a minute.'); });
   net.on('close', () => {
     if (state === 'menu' || state === 'loading') return;
     game.stop(false); voice.closeAll(); audio.stopAmbience(); audio.stopMusic(); setState('menu'); $('stats').textContent = 'Disconnected from server';
@@ -169,7 +212,7 @@ function showResults(m) {
   $('res-title').textContent = you ? 'VICTORY' : win ? `${win.name.toUpperCase()} WINS` : 'NO SURVIVORS';
   $('res-title').className = 'panel-head ' + (you ? 'win' : '');
   $('res-sub').textContent = { chips: `Collected ${game.goal} chips`, last: 'Last one standing', time: 'Time expired: most chips wins', draw: 'Everyone fell' }[m.reason] || '';
-  $('res-body').innerHTML = m.results.map((r, i) => `<tr class="${r.id === net.id ? 'me' : ''} ${r.id === m.winner ? 'winner' : ''}"><td>${i + 1}</td><td><i style="background:${r.color}"></i>${esc(r.name)}</td><td>${r.chips}</td><td>${r.kills}</td><td>${r.deaths}</td><td>${r.id === m.winner ? '★' : ''}</td></tr>`).join('');
+  $('res-body').innerHTML = m.results.map((r, i) => `<tr class="${r.id === net.id ? 'me' : ''} ${r.id === m.winner ? 'winner' : ''}"><td>${i + 1}</td><td><i style="background:${r.color}"></i>${esc(r.name)}${r.bot ? '<span class="botTag">bot</span>' : ''}</td><td>${r.chips}</td><td>${r.kills}</td><td>${r.deaths}</td><td>${r.id === m.winner ? '★' : ''}</td></tr>`).join('');
   endAt = performance.now() + RULES.endScreen * 1000;
   setState('results');
 }
@@ -177,6 +220,7 @@ function showResults(m) {
 // ------------------------------------------------------------------ UI wiring
 function bindUI() {
   $('btn-play').onclick = play;
+  $('btn-practice').onclick = practice;
   $('in-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') play(); });
   $('in-code').addEventListener('keydown', (e) => { if (e.key === 'Enter') play(); });
   $('btn-settings').onclick = () => openOverlay('settings');
@@ -340,7 +384,7 @@ function lobbySpeakers() {
   document.querySelectorAll('#lb-players .pl').forEach((el) => {
     const id = el.dataset.id, sp = id === net.id ? voice.localSpeaking() : voice.speaking(id);
     el.classList.toggle('talk', !!sp);
-    el.querySelector('.mic').textContent = id === net.id ? '' : (voice.state(id) === 'connected' ? '🔊' : '…');
+    el.querySelector('.mic').textContent = (id === net.id || el.querySelector('.bot')) ? '' : (voice.state(id) === 'connected' ? '🔊' : '…');
   });
 }
 

@@ -16,6 +16,8 @@ import {
   RULES, ORB, ORB_ORDER, orbDamage, makeLoadout, FLAGS, PLAYER_COLORS, mulberry32,
 } from './public/js/rules.js';
 
+import { Brain, LEVELS, PERSONAS, BOT_NAMES } from './bot_brain.js';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(__dirname, 'public');
 const PORT = Number(process.env.PORT) || 8080;
@@ -24,6 +26,7 @@ const MIN_PLAYERS = Number(process.env.MIN_PLAYERS) || RULES.minPlayers;
 const MAX_PLAYERS = Math.min(Number(process.env.MAX_PLAYERS) || RULES.maxPlayers, PLAYER_COLORS.length);
 const COUNTDOWN = Number(process.env.COUNTDOWN) || RULES.lobbyCountdown;
 const TICK = 1 / 30;
+const SIM_SPEED = Math.max(1, Number(process.env.SIM_SPEED) || 1); // >1 only for fast-forward testing
 
 const r2 = (v) => Math.round(v * 100) / 100;
 const clampN = (v, a, b, d = 0) => (Number.isFinite(v) ? Math.min(b, Math.max(a, v)) : d);
@@ -147,6 +150,7 @@ class Player {
   constructor(id) {
     this.id = id; this.name = 'Player'; this.conn = null; this.lobby = null; this.color = PLAYER_COLORS[0];
     this.msgCount = 0; this.msgWindow = Date.now(); this.lastChat = 0; this.queuedAt = 0;
+    this.bot = null; // set for computer-controlled players (practice matches)
     this.resetMatch();
   }
   resetMatch() {
@@ -159,19 +163,52 @@ class Player {
     this.lastSt = 0; this.lastMoving = 0; this.speed = 0;
     this.lastHitBy = null; this.lastHitAt = -99; this.oob = 0;
   }
-  send(o) { if (this.conn) this.conn.send(o); }
+  send(o) { if (this.conn) this.conn.send(o); else if (this.bot) this.bot.onMsg(o); }
 }
 
+const humansIn = (l) => { let n = 0; for (const p of l.players.values()) if (!p.bot) n++; return n; };
+
 function stats() {
-  let queued = 0, inMatch = 0;
-  for (const l of lobbies.values()) { if (l.state === 'waiting') queued += l.players.size; else inMatch += l.players.size; }
-  return { online: players.size, searching: queued, inMatch, lobbies: lobbies.size };
+  let queued = 0, inMatch = 0, practice = 0;
+  for (const l of lobbies.values()) {
+    const n = humansIn(l);
+    if (l.practice) practice++;
+    else if (l.state === 'waiting') queued += n; else inMatch += n;
+  }
+  return { online: players.size, searching: queued, inMatch, lobbies: lobbies.size, practice };
+}
+
+// ---- practice matches against bots -------------------------------------------------------
+const MAX_PRACTICE = Number(process.env.MAX_PRACTICE) || 4;
+const BOT_DEBUG = !!process.env.BOT_DEBUG;
+let botSeq = 0;
+const shuffle = (a) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+
+function createPractice(host, opts) {
+  let practiceCount = 0;
+  for (const l of lobbies.values()) if (l.practice) practiceCount++;
+  if (practiceCount >= MAX_PRACTICE) return false;
+  const l = new Lobby(lobbySeq++, null);
+  l.practice = true;
+  lobbies.set(l.id, l);
+  l.add(host);
+  const n = Math.max(MIN_PLAYERS - 1, Math.min(MAX_PLAYERS - 1, Math.round(Number(opts && opts.bots)) || 5), 1);
+  const level = opts && (LEVELS[opts.level] || opts.level === 'mixed') ? opts.level : 'normal';
+  const names = shuffle([...BOT_NAMES]), kinds = shuffle(Object.keys(PERSONAS));
+  for (let i = 0; i < n; i++) {
+    const b = new Player('b' + (++botSeq));
+    b.name = names[i % names.length] + (i >= names.length ? i : '');
+    const lv = level === 'mixed' ? ['easy', 'normal', 'normal', 'hard', 'hard'][Math.floor(Math.random() * 5)] : level;
+    b.bot = new Brain(b, l, lv, kinds[i % kinds.length]);
+    l.add(b);
+  }
+  return true;
 }
 
 function findLobby(code) {
   let best = null;
   for (const l of lobbies.values()) {
-    if (l.state !== 'waiting' || l.players.size >= MAX_PLAYERS) continue;
+    if (l.practice || l.state !== 'waiting' || l.players.size >= MAX_PLAYERS) continue;
     if ((l.code || '') !== (code || '')) continue;
     if (!best || l.players.size > best.players.size) best = l;
   }
@@ -184,7 +221,7 @@ function leaveLobby(p) {
   if (!l) return;
   l.remove(p);
   p.lobby = null;
-  if (l.players.size === 0) lobbies.delete(l.id);
+  if (humansIn(l) === 0) lobbies.delete(l.id); // empty (bots alone do not keep a lobby alive)
 }
 
 function dropPlayer(p) {
@@ -205,6 +242,10 @@ function handleMessage(p, raw) {
       case 'queue': {
         if (p.lobby) leaveLobby(p);
         if (typeof m.name === 'string') p.name = m.name.replace(/[^\p{L}\p{N} _\-.]/gu, '').trim().slice(0, 16) || p.name;
+        if (m.practice && typeof m.practice === 'object') {
+          if (!createPractice(p, m.practice)) p.send({ t: 'left', why: 'busy' });
+          break;
+        }
         const code = typeof m.code === 'string' ? m.code.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 8) : '';
         const l = findLobby(code || null);
         l.add(p);
@@ -275,14 +316,18 @@ class Lobby {
     this.t = 0; this.tick = 0; this.idc = 1; this.startCount = 0; this.endsAt = 0;
     this.orbs = new Map(); this.clouds = []; this.fires = []; this.pickups = new Map(); this.pings = [];
     this.deadTrees = new Set();
+    this.practice = false; // true: private match against bots
   }
   nid() { return this.idc++; }
-  broadcast(o) { const f = textFrame(JSON.stringify(o)); for (const p of this.players.values()) p.conn && p.conn.sendRaw(f); }
+  broadcast(o) {
+    const f = textFrame(JSON.stringify(o));
+    for (const p of this.players.values()) { if (p.conn) p.conn.sendRaw(f); else if (p.bot && o.t === 'ev') p.bot.onEv(o); }
+  }
   info() {
     return {
-      t: 'lobby', id: this.id, code: this.code, state: this.state, min: MIN_PLAYERS, max: MAX_PLAYERS,
+      t: 'lobby', id: this.id, code: this.code, state: this.state, min: MIN_PLAYERS, max: MAX_PLAYERS, practice: this.practice,
       countdown: this.countdown === null ? null : Math.max(0, Math.ceil(this.countdown)),
-      players: [...this.players.values()].map((p) => ({ id: p.id, name: p.name, color: p.color })),
+      players: [...this.players.values()].map((p) => ({ id: p.id, name: p.name, color: p.color, bot: !!p.bot })),
     };
   }
   sendInfo() { this.lastInfo = Date.now(); this.broadcast(this.info()); }
@@ -308,7 +353,7 @@ class Lobby {
   update(dt) {
     if (this.state === 'waiting') {
       if (this.players.size >= MIN_PLAYERS) {
-        if (this.countdown === null) this.countdown = COUNTDOWN;
+        if (this.countdown === null) this.countdown = this.practice ? 4 : COUNTDOWN;
         if (this.players.size >= MAX_PLAYERS) this.countdown = Math.min(this.countdown, RULES.fullCountdown);
         this.countdown -= dt;
         if (this.countdown <= 0) return this.start();
@@ -329,12 +374,16 @@ class Lobby {
   }
 
   start() {
-    this.state = 'running'; this.t = 0; this.tick = 0; this.idc = 1;
+    this.state = 'running'; this.t = 0; this.lastDeathT = 0; this.tick = 0; this.idc = 1;
     this.orbs.clear(); this.clouds = []; this.fires = []; this.pickups.clear(); this.pings = [];
     this.deadTrees = new Set();
     const list = [...this.players.values()];
     this.startCount = list.length;
     const spawns = pickSpawns(list.length, this.rnd);
+    if (process.env.BOT_CLOSE) { // testing aid: everyone drops within ~70 m of the first spawn
+      const c = spawns[0];
+      for (let i = 1; i < spawns.length; i++) spawns[i] = { x: c.x + (this.rnd() - 0.5) * 140, z: c.z + (this.rnd() - 0.5) * 140 };
+    }
     list.forEach((p, i) => {
       p.resetMatch();
       const s = spawns[i];
@@ -348,14 +397,16 @@ class Lobby {
         this.pickups.set(id, { id, k: 'cache', x, z, y: floorAt(x, z, 50) + 0.45, items: randomCacheItems(this.rnd), active: true, respawnAt: 0 });
       }
     }
-    const plist = list.map((p) => ({ id: p.id, name: p.name, color: p.color }));
+    const plist = list.map((p) => ({ id: p.id, name: p.name, color: p.color, bot: !!p.bot }));
     for (const p of list) {
+      if (p.bot) continue;
       p.send({
         t: 'start', you: p.id, seed: WORLD.seed, players: plist, goal: RULES.chipGoal, matchTime: RULES.matchTime,
         spawn: { x: p.x, y: p.y, z: p.z }, loadout: p.loadout.map((x) => ORB_ORDER.indexOf(x)),
         pickups: this.pickupList(),
       });
     }
+    for (const p of list) if (p.bot) p.bot.begin();
   }
 
   pickupList() {
@@ -368,7 +419,7 @@ class Lobby {
   end(winnerId, reason) {
     if (this.state !== 'running') return;
     this.state = 'ended'; this.t = 0; this.endsAt = RULES.endScreen;
-    const results = [...this.players.values()].map((p) => ({ id: p.id, name: p.name, color: p.color, chips: p.chips, kills: p.kills, deaths: p.deaths, alive: p.alive }));
+    const results = [...this.players.values()].map((p) => ({ id: p.id, name: p.name, color: p.color, chips: p.chips, kills: p.kills, deaths: p.deaths, alive: p.alive, bot: !!p.bot }));
     results.sort((a, b) => (b.id === winnerId) - (a.id === winnerId) || b.chips - a.chips || b.kills - a.kills);
     this.broadcast({ t: 'end', winner: winnerId, reason, results });
     this.orbs.clear(); this.clouds = []; this.fires = [];
@@ -457,7 +508,7 @@ class Lobby {
 
   killPlayer(p, by, kind) {
     if (!p.alive) return;
-    p.alive = false; p.hp = 0; p.deaths++;
+    p.alive = false; p.hp = 0; p.deaths++; this.lastDeathT = this.t; // bots read this to detect a stalemate
     if (!by && p.lastHitBy && this.t - p.lastHitAt < 12) by = p.lastHitBy;
     const killer = by && by !== p.id ? this.players.get(by) : null;
     if (killer) killer.kills++;
@@ -493,6 +544,7 @@ class Lobby {
     const owner = this.players.get(o.owner);
     if (owner) owner.remotes = owner.remotes.filter((id) => id !== o.id);
     const def = ORB[o.type];
+    if (BOT_DEBUG) { let nd = 1e9, nn = ''; for (const q of this.players.values()) { if (!q.alive || q.id === o.owner || q.phase !== 'play') continue; const dd = Math.hypot(q.x - x, q.y + 0.9 - y, q.z - z); if (dd < nd) { nd = dd; nn = q.name; } } const ow = this.players.get(o.owner); console.log(`  boom ${o.type} by ${ow ? ow.name : '?'} t=${this.t.toFixed(1)} nearest enemy ${nn} ${nd.toFixed(1)}m` + (o.expect ? ` | landed ${Math.hypot(x - o.expect.x, z - o.expect.z).toFixed(1)}m from predicted (age ${o.age.toFixed(1)} vs ${o.expect.t.toFixed(1)}), ${Math.hypot(x - o.expect.ox, z - o.expect.oz).toFixed(0)}m from thrower` : '')); }
     this.broadcast({ t: 'ev', k: 'boom', o: ORB_ORDER.indexOf(o.type), x: r2(x), y: r2(y), z: r2(z), by: o.owner });
     const treeR = o.type === 'implosion' ? def.trees : def.blast ? def.blast * 0.45 : 0;
     if (treeR > 0) destroyTrees(x, z, treeR, this.deadTrees);
@@ -707,6 +759,17 @@ class Lobby {
   step(dt) {
     this.t += dt; this.tick++;
     const w = wind(this.t);
+    const t0 = BOT_DEBUG ? process.hrtime.bigint() : 0n;
+    for (const p of this.players.values()) if (p.bot) { try { p.bot.update(dt); } catch (e) { console.error('bot error', p.name, e); } }
+    if (BOT_DEBUG) {
+      const us = Number(process.hrtime.bigint() - t0) / 1000;
+      this.botUs = (this.botUs || 0) + us; this.botMax = Math.max(this.botMax || 0, us);
+      if (this.tick % 450 === 0) {
+        console.log(`[practice ${this.id}] t=${this.t.toFixed(0)}s bot cpu avg ${(this.botUs / 450).toFixed(0)}us max ${this.botMax.toFixed(0)}us / tick`);
+        this.botUs = 0; this.botMax = 0;
+        for (const p of this.players.values()) if (p.bot) console.log(`   ${p.name.padEnd(8)} ${p.bot.levelName.padEnd(6)} ${p.bot.personaName.padEnd(9)} ${(p.alive ? p.bot.state : 'DEAD').padEnd(7)} hp=${Math.round(p.hp)} chips=${p.chips} kills=${p.kills} orbs=${p.bot.ammo()} scans=${p.bot.scans || 0} contacts=${p.bot.fresh(40).length} goal=${p.bot.goalKind} c=${JSON.stringify(p.bot.cstat || {})} s=${JSON.stringify(p.bot.sstat || {})} @${Math.round(p.x)},${Math.round(p.z)}`);
+      }
+    }
     for (const o of [...this.orbs.values()]) this.stepOrb(o, dt);
     // gas
     for (let i = this.clouds.length - 1; i >= 0; i--) {
@@ -789,7 +852,7 @@ setInterval(() => {
   for (const l of [...lobbies.values()]) l.update(TICK);
   const now = Date.now();
   for (const p of players.values()) if (p.conn && now - p.conn.last > 60000) p.conn.finish();
-}, TICK * 1000);
+}, TICK * 1000 / SIM_SPEED);
 
 process.on('uncaughtException', (e) => console.error('uncaught', e));
 process.on('unhandledRejection', (e) => console.error('unhandled', e));
